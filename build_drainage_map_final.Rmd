@@ -1,0 +1,515 @@
+---
+title: "build_drainage_map"
+author: "elisabethburnor"
+date: "12/30/2021"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(here)
+library(sf)
+library(raster)
+library(spData)   
+library(spDataLarge)
+library(sp)
+library(nngeo)
+library(data.table)
+library(fst)
+library(leaflet)
+library(here)
+library(dplyr)
+library(tmap)
+library(terra)
+library(rgdal)
+library(rgeos)
+library(osmdata)
+library(ggplot2)
+```
+
+```{r}
+# Shapefiles:
+
+# bl: Bluelines
+bl = st_read(here("shapefiles/vellore", "Bluelines.shp"))
+
+# drainL: Drainage Line
+drainL = st_read(here("shapefiles/vellore", "DrainageLine.shp"))
+
+# catchmnt: Catchment Area
+catch = st_read(here("shapefiles/vellore", "Catchment.shp"))
+
+# Sites: Sampling sites
+sites = st_read(here("shapefiles/vellore", "Sites.shp"))
+
+# Drainage Points
+drainP = st_read(here("shapefiles/vellore", "DrainagePoint.shp"))
+
+```
+
+# Spatial subsetting
+```{r}
+
+# Collect only drainage lines that are also blue lines
+# Drain_bl: drainage lines that are blue lines
+drain_bl = drainL[bl,]
+
+# Rename geometry column in drain_bl
+drain_bl = drain_bl %>% rename(drain_geom = geometry)
+# Rename geometry column in drainP
+drainP = drainP %>% rename(drain_point_geom = geometry)
+
+# Join drain_bl dataframe and drainP dataframe in a dataframe called 'lines'
+lines = left_join(as.data.frame(drain_bl), as.data.frame(drainP), by = c("DrainID", "CumulPop"))
+lines = st_as_sf(lines)
+drain_lines = lines
+
+# Convert drainage lines to sp object
+lines_sp = as(lines, Class = "Spatial")
+
+```
+
+
+
+# Build 'lines' dataframe to include start and end points
+```{r}
+
+# Find endpoints of each linestring
+# Takes the row of a dataframe with drainage lines and calculates end points
+get_endpoints = function(line) {
+  endpts = st_sfc(st_line_sample(line, sample = c(0,1)))
+  return(endpts)
+}
+
+# Find which end point is the drainage end point (the point towards which water is flowing)
+# and which end point is the drainage start point (the point from which water is flowing)
+
+find_drain_endpoint = function(drain_id) {
+  segment = lines[which(lines$DrainID == drain_id),]
+  drain_point = segment$drain_point_geom
+  # pull the end points of the drainage line segment
+  end_points = st_cast(segment$geom_endpts, "POINT")
+  
+  # Compute which end point is closer to the drainage point
+  closer_end_point = st_nearest_feature(drain_point, end_points)
+  drain_end = end_points[closer_end_point]
+  drain_start = end_points[-closer_end_point]
+  return(drain_end)
+}
+
+
+find_drain_startpoint = function(drain_id) {
+  segment = lines[which(lines$DrainID == drain_id),]
+  drain_point = segment$drain_point_geom
+  # pull the end points of the drainage line segment
+  end_points = st_cast(segment$geom_endpts, "POINT")
+  
+  # Compute which end point is closer to the drainage point
+  closer_end_point = st_nearest_feature(drain_point, end_points)
+  drain_end = end_points[closer_end_point]
+  drain_start = end_points[-closer_end_point]
+  return(drain_start)
+}
+
+# Add geom columns to store endpoints
+lines = lines %>% mutate(geom_endpts = get_endpoints(drain_geom))
+
+lines = lines %>% rowwise() %>% mutate(drainage_start = find_drain_startpoint(DrainID))
+
+lines = lines %>% rowwise() %>% mutate(drainage_end = find_drain_endpoint(DrainID))
+
+store_lines = lines
+
+# small_map = c(573, 630, 635, 639, 649, 643, 642, 634)
+# lines = lines[which(lines$DrainID %in% small_map),]
+
+# lines = filter(lines, Shape_Leng > 50)
+
+```
+
+# Check that start/end points are correctly labelled for each segment in dataframe
+```{r}
+
+reassigned_lines = data.frame()
+ok = data.frame()
+
+for (i in 1:nrow(lines)) {
+  
+  line_segment = lines[i,]
+  line_id = line_segment$DrainID
+  end_points = st_cast(line_segment$geom_endpts, "POINT")
+  
+  # Cast each end point as a 'SpatialPoints'
+  # This allows for the addition of a buffer 
+  start = as(line_segment$drainage_start, Class = "Spatial")
+  start = gBuffer(start, byid = T, width = 45)
+  
+  end = as(line_segment$drainage_end, Class = "Spatial")
+  end = gBuffer(end, byid = T, width = 45)
+  
+  # Look for intersections between all lines and start point
+  # These will be called 'parent' lines
+  intersection_grid = rgeos::gIntersects(start, lines_sp, byid= T)
+  rows = which(intersection_grid == T)
+  parent_lines = lines[rows,]
+  parent_lines = filter(parent_lines, DrainID != line_id)
+  
+  # Look for intersections between all lines and end point
+  # These will be called 'daughter' lines
+  intersection_grid_d = rgeos::gIntersects(end, lines_sp, byid= T)
+  rows_d = which(intersection_grid_d == T)
+  daughter_lines = lines[rows_d,]
+  daughter_lines = filter(daughter_lines, DrainID != line_id)
+  
+  # Store closer daughter endpoint
+  if(nrow(daughter_lines) != 0) {
+    daughter = daughter_lines[1,]
+    
+    # 1 indicates that the daughter start point is closer (correct option)
+    # 2 indicates that the daughter end point is closer (indicates error)
+    closer_daughter_endpoint = 
+      st_nearest_feature(c(line_segment$drainage_end),
+                         c(daughter$drainage_start, daughter$drainage_end))
+  } else {
+    closer_daughter_endpoint = 0
+  }
+
+  # Store closer parent endpoint
+  if(nrow(parent_lines) != 0) {
+    
+    parent = parent_lines[1,]
+    
+    # 1 indicates that the parent start point is closer (indicates error)
+    # 2 indicates that the parent end point is closer (correct option)
+    closer_parent_endpoint = st_nearest_feature(line_segment$drainage_start, c(parent$drainage_start, parent$drainage_end))
+  } else {
+    closer_parent_endpoint = 0
+  }
+  
+  if (closer_daughter_endpoint == 1 & closer_parent_endpoint == 2) {
+    # endpoints are all correctly assigned
+    ok = rbind(ok, data.frame(id = line_id))
+  } 
+  if (closer_daughter_endpoint == 1 & nrow(parent_lines) == 0) {
+    ok = rbind(ok, data.frame(id = line_id))
+  }
+  if (nrow(daughter_lines) == 0 & closer_parent_endpoint == 2) {
+    ok = rbind(ok, data.frame(id = line_id))
+  }
+  # if (closer_daughter_endpoint == 1 & closer_parent_endpoint == 1) {
+  #   # The parent segment is backwards
+  # }
+  # if (closer_daughter_endpoint == 2 & closer_parent_endpoint == 2) {
+  #   # The daughter segment is backwards
+  # } 
+  if (closer_daughter_endpoint == 2 & closer_parent_endpoint == 1) {
+    reassigned_lines = rbind(reassigned_lines, data.frame(id = line_id, reason = 'segment wrong'))
+  }
+  if (closer_parent_endpoint == 1 & nrow(daughter_lines) == 0) {
+    reassigned_lines = rbind(reassigned_lines, data.frame(id = line_id, reason = 'could be intersection'))
+    
+  }
+  if (closer_daughter_endpoint == 2 & nrow(parent_lines) == 0) {
+    reassigned_lines = rbind(reassigned_lines, data.frame(id = line_id, reason = 'could be intersection'))
+  }
+}
+
+```
+
+``` {r}
+
+fix_lines = filter(reassigned_lines, reason == "segment wrong")
+
+# Reassign lines with mistakes
+for (i in 1:nrow(fix_lines)) {
+  
+  id = fix_lines$id[i]
+  segment_row = which(lines$DrainID == id)
+  segment = lines[segment_row,]
+  start = segment$drainage_start
+  end = segment$drainage_end
+  
+  segment$drainage_start = end
+  segment$drainage_end = start
+  
+  lines[segment_row,] = segment
+}
+lines = st_as_sf(lines)
+
+lines_endpoints_sp = as(lines$drainage_end, Class = "Spatial")
+
+```
+
+# Assign parents to each segment
+```{r}
+
+find_parents = function(drainID) {
+  
+  # Identify line segment
+  line_segment = lines[which(lines$DrainID == drainID),]
+  # Save line segment as sp object
+  this_line_sp = as(line_segment, Class = "Spatial")
+  this_line_sp = gBuffer(this_line_sp, byid = T, width = 45)
+  
+  # Store line id
+  line_id = line_segment$DrainID
+  
+  # Cast each end point as a 'SpatialPoints'
+  # This allows for the addition of a buffer 
+  start = as(line_segment$drainage_start, Class = "Spatial")
+  start = gBuffer(start, byid = T, width = 45)
+  # 
+  # end_sp = as(line_segment$drainage_end, Class = "Spatial")
+  
+  # Look for intersections between all lines and the starting point
+  intersection_grid = rgeos::gIntersects(this_line_sp, lines_sp, byid= T)
+  rows = which(intersection_grid == T)
+  intersection_lines = lines[rows,]
+  intersection_lines = filter(intersection_lines, DrainID != line_id)
+  
+  parent_ids = c()
+  
+  if (nrow(intersection_lines)==0) {
+    parent_ids = NA
+  } else {
+    for (i in 1:nrow(intersection_lines)) {
+      i_segment = 
+        lines[which(lines$DrainID == intersection_lines$DrainID[i]),]
+      i_seg_ID = i_segment$DrainID
+  
+      # See which is closer to the line's endpoint (intersection start or intersection end):
+      closer_end = st_nearest_feature(line_segment$drainage_end,
+                                      c(i_segment$drainage_start, i_segment$drainage_end))
+      if(closer_end == 1) {
+        i_end_sp = as(i_segment$drainage_end, Class = "Spatial")
+        check_intersection = rgeos::gIntersects(start, i_end_sp)
+        if(check_intersection == TRUE) {
+          parent_ids = c(parent_ids, i_segment$DrainID)
+        }
+      }
+      
+      
+      if(closer_end == 2) {
+        # See which is closer to the intersecting line's endpoint
+        closer_to_i_end = st_nearest_feature(i_segment$drainage_end,
+                                              c(line_segment$drainage_start, line_segment$drainage_end))
+        if(closer_to_i_end == 1) {
+          parent_ids = c(parent_ids, i_segment$DrainID)
+        }
+        
+      }
+    }
+  }
+  parent_ids = list(parent_ids)
+  return(parent_ids)
+}
+
+lines = lines %>% mutate(parents_ids = find_parents(DrainID))
+
+```
+
+# Add column to 'lines' dataframe with parent ids
+```{r}
+
+get_parents_df = function(line_df) {
+  parent_list = line_df$parents_ids[[1]]
+  parent_df = filter(lines, DrainID %in% parent_list)
+  return(parent_df)
+}
+
+```
+
+# Build Map
+```{r}
+
+start_segment = filter(lines, DrainID == 573)
+
+# Recursively build map
+
+build_map = function(segment) {
+  
+  id = segment$DrainID
+  if(is.null(segment$parents_ids[[1]])) {
+    return(segment)
+  } else {
+    parent_df = get_parents_df(segment)
+    parent_map_df = segment
+    for (i in 1:nrow(parent_df)) {
+      parent_map = build_map(parent_df[i,])
+      parent_map_df = rbind(parent_map_df, parent_map)
+    }
+    return(parent_map_df)
+  }
+}
+
+
+# debug(build_map)
+system_map = build_map(start_segment)
+sampling_point = start_segment
+sampling_point$sample_label = "Sampling Point"
+
+
+```
+
+# Print system maps
+```{r}
+system_map_draw = tm_shape(system_map, unit = 'm') +
+  tm_lines(col = "lightblue") + 
+  tm_text('DrainID', size = 0.4, just = "right") +
+  tm_shape(system_map$drainage_start) +
+  tm_symbols(size = 0.1, col = "green") +
+  tm_shape(system_map$drain_point_geom) +
+  tm_symbols(size = 0.1, col = "orange") +
+  tm_shape(bl) +
+  tm_lines(col = "blue")
+system_map_draw
+
+
+system_map_draw2 = tm_shape(system_map, unit = 'm') +
+  tm_lines(col = "blue") + 
+  tm_text('DrainID', size = 0.75, just = "right") +
+  # tm_shape(bl) +
+  # tm_lines(col = "lightblue") +
+  tm_shape(sites) +
+  tm_symbols(col = "red", size = 0.4) 
+
+system_map_draw2
+```
+
+# Save as CSV for python model
+```{r}
+
+#save
+
+system_map_csv <- system_map %>% dplyr::select(c("Shape_Leng", "DrainID", "WorldPop", "CumulPop", "parents_ids"))
+system_map_csv <- st_drop_geometry(system_map_csv)
+
+
+
+# Pull relevant info out of sf object
+
+# system_map_all_shape = lines[,c("Shape_Leng", "DrainID", "WorldPop", "parents_ids")]
+# system_map_csv = st_drop_geometry(system_map_csv)
+
+```
+
+# convert parent column - can't be list
+```{r}
+
+# check the max number of parents
+max_parents = 0
+for (i in 1:nrow(system_map_csv)) {
+  parent_list = system_map_csv$parents_ids[i][[1]]
+  if(length(parent_list) > max_parents) {
+    max_parents = length(parent_list) 
+  }
+}
+
+# add a column for each parent
+
+for (i in 1:max_parents) {
+  column_name = paste0("Parent_", i)
+  system_map_csv[[column_name]] = 0
+}
+
+# Fill in data
+
+for(i in 1:nrow(system_map_csv)) {
+  parent_list = system_map_csv$parents_ids[i][[1]]
+  if(length(parent_list != 0)) {
+    for (j in 1:length(parent_list)) {
+      column_name = paste0("Parent_", j)
+      system_map_csv[[column_name]][i] = parent_list[j]
+    }
+  }
+}
+
+system_map_csv = dplyr::select(system_map_csv, !parents_ids)
+
+```
+
+```{r}
+
+parent_columns = system_map_csv[,4:ncol(system_map_csv)]
+
+map_info = system_map_csv[,c("DrainID", "Shape_Leng", "WorldPop")]
+
+map_csv = cbind(map_info, parent_columns)
+
+map_csv <- map_csv %>%
+  mutate(Parent_1 = ifelse(Parent_1 == 0, -1, Parent_1),
+         Parent_2 = ifelse(Parent_2 == 0, -1, Parent_2),
+         Parent_3 = ifelse(Parent_3 == 0, -1, Parent_3))
+
+map_csv <- map_csv 
+
+
+
+write.csv(map_csv, "/Users/elisabethburnor/Desktop/Typhoid model GIS/sample_run_system_map.csv")
+
+
+#write.csv(system_map_csv, here('output', 'vellore_map.csv'))
+
+#map_csv = read.csv("/Users/elisabethburnor/Desktop/Typhoid model GIS/py/Fixed_Params.csv")
+
+```
+
+
+# Make a nice map
+```{r}
+
+system_map_crs = st_transform(system_map, 4326)
+
+big_streets <- getbb("Vellore")%>%
+  opq()%>%
+  add_osm_feature(key = "highway", 
+                  value = c("motorway", "primary", "motorway_link", "primary_link")) %>%
+  osmdata_sf()
+
+big_streets
+
+med_streets <- getbb("Vellore")%>%
+  opq()%>%
+  add_osm_feature(key = "highway", 
+                  value = c("secondary", "tertiary", "secondary_link", "tertiary_link")) %>%
+  osmdata_sf()
+
+
+small_streets <- getbb("Vellore")%>%
+  opq()%>%
+  add_osm_feature(key = "highway", 
+                  value = c("residential", "living_street",
+                            "unclassified",
+                            "service", "footway"
+                  )) %>%
+  osmdata_sf()
+
+system_bb = st_bbox(system_map_crs$drain_geom)
+
+
+sampling_point = system_map_crs[which(system_map_crs$DrainID==573),]
+sampling_point$label = "Sampling Point"
+
+
+nice_map =  tm_shape(big_streets$osm_lines, bbox = system_bb) +
+  tm_lines(col = "grey") +
+  tm_shape(med_streets$osm_lines) +
+  tm_lines(col = "grey") +
+  tm_shape(small_streets$osm_lines) +
+  tm_lines(col = "gray90") +
+  tm_grid(col = "gray80", labels.size = 0.9) +
+  tm_shape(system_map_crs$drain_geom) +
+  tm_lines(col = "blue", lwd = 1.5) +
+  tm_shape(system_map_crs[which(system_map_crs$DrainID %in% c(573, 639, 634, 712, 684, 659, 762, 756, 891, 1007, 963, 856)),]) +
+	tm_text("DrainID", size = 0.9, col = "black", just = "left", xmod = -0.6, ymod = 0.8) +
+  tm_shape(system_map_crs[which(system_map_crs$DrainID == 699),]) +
+	tm_text("DrainID", size = 0.9, col = "black", just = "left", xmod = -0.9, ymod = 0.3) 
+
+
+nice_map
+```
+
+
+
