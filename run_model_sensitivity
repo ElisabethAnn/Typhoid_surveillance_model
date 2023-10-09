@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Aug 17 18:47:37 202s3
+
+@author: elisabethburnor
+"""
+
+import dyn_model as dyn
+import numpy as np
+#import pathlib as pathlib
+import time as time
+import os as os
+import pickle as pickle
+
+# Read in csvs
+fixed_p = np.loadtxt('/Users/elisabethburnor/Desktop/Typhoid model GIS/sensitivity_analyses_varVelFloTogether/Fixed_Params.csv',skiprows = 1, delimiter=",")
+dist_p = np.loadtxt('/Users/elisabethburnor/Desktop/Typhoid model GIS/sensitivity_analyses_varVelFloTogether/Dist_Params.csv',skiprows = 1, delimiter=",")
+day_p = np.loadtxt('/Users/elisabethburnor/Desktop/Typhoid model GIS/sensitivity_analyses_varVelFloTogether/Day_Params.csv',skiprows = 1, delimiter=",")
+
+# These stay the same every run
+probShed = np.loadtxt('/Users/elisabethburnor/Desktop/Typhoid model GIS/parameter_distributions/shedding_probability.csv', skiprows = 1, delimiter=",")
+shedDist = np.loadtxt('/Users/elisabethburnor/Desktop/Typhoid model GIS/parameter_distributions/shedding_distribution.csv',  skiprows = 1, delimiter=",")
+
+# Read in scenarios
+scenarios = np.loadtxt('/Users/elisabethburnor/Desktop/Typhoid model GIS/sensitivity_analyses_varVelFloTogether/sens_scenarios.csv', skiprows = 1, delimiter = ',')
+scenario_labels = np.loadtxt('/Users/elisabethburnor/Desktop/Typhoid model GIS/sensitivity_analyses_varVelFloTogether/sens_scenarios_labels.csv', dtype = 'str', skiprows = 1, delimiter = ',')
+
+
+num_rows, num_cols = scenarios.shape
+
+sr = {}
+for i in range(num_rows):
+    print(i)
+
+    prev = scenarios[i,0]
+    vel = 0
+    env_mean = scenarios[i,2]
+    env_sd = scenarios[i,3]
+    
+    label = scenario_labels[i]
+    
+    sr[label] = [label, prev, vel, env_mean, env_sd]
+
+
+start_sens = time.time()
+for run in sr.values():
+    
+    run = sr['MedPrev_MedFlow']
+
+    label = run[0]
+    prev = run[1]
+    vel = run[2]
+    env_mean = run[3]
+    env_sd = run[4]
+    
+    path = "/Users/elisabethburnor/Desktop/Typhoid model GIS/plot_uncertainty/" + label
+    os.makedirs(path)
+    
+    fixed_p_sens = fixed_p
+    fixed_p_sens[:,4] = prev
+    
+    dist_p_sens = dist_p
+    dist_p_sens[7] = env_mean
+    dist_p_sens[8] = env_sd
+    
+    run_savepath = path + "/"
+
+    # Set up water system
+    # WaterSystem(fixParams,distParams,dayParams, shedding, samVol, sens, bactNum)
+    
+ 
+    ws = dyn.WaterSystem(fixParams=fixed_p_sens, distParams = dist_p_sens, dayParams = day_p, probShed = probShed,sheddingDist = shedDist, samVol = 6, sens = 0.83, bactNum = 1,savePath = run_savepath, resolution = 10)
+ 
+    start_run = time.time()
+    ws.run(3,1000)
+    stop_run = time.time()
+    print("one run", stop_run-start_run)
+
+    
+    ws.createCSV('sens_run')
+    ws.graphByHour(saveFile = True)
+    ws.graphByBranch(saveFile = True)
+    ws.graphByBranchConc(saveFile = True)
+    
+    ws.graphDetectByBranchSection(573, 0, saveFile = False)
+    ws.graphDetectByBranchSection(815, 5, saveFile = True)
+    ws.graphDetectByBranchSection(850, 0, saveFile = True)
+    ws.graphDetectByBranchSection(912, 0, saveFile = True)
+    ws.graphDetectByBranchSection(937, 9, saveFile = True)
+    
+    fix_path = run_savepath + "fixed_p.csv"
+    dist_path = run_savepath + "dist_p.csv"
+    
+    np.savetxt(fix_path, fixed_p_sens, delimiter=",")
+    np.savetxt(dist_path, dist_p_sens, delimiter = ",")
+    
+ 
+    with open("/Users/elisabethburnor/Desktop/Typhoid model GIS/sensitivity_analyses_varVelFloTogether/" + label + "/store_ws.py", 'wb') as system_save:
+        
+        pickle.dump(ws, system_save)
+    
+    print(label, " run done.")
+
+print("sens analysis ", time.time() - start_sens)
+
+
+#with open("/Users/elisabethburnor/Desktop/Typhoid model GIS/sensitivity_analyses_varVelFloTogether/" + label + "/store_system.py", 'rb') as system_save:
+    
+#    ws_load = pickle.l
+oad(system_save)
+
+bran = 573
+section = 0
+branchM = np.loadtxt('/Users/elisabethburnor/Desktop/Typhoid model GIS/sensitivity_analyses_varVelFloTogether_analyze/MedPrev_MedFlow/Dmean.csv',skiprows = 1, delimiter=",")
+sectM = np.
+  # sectSD = bran.detectSTD
+sectLower = np.loadtxt('/Users/elisabethburnor/Desktop/Typhoid model GIS/sensitivity_analyses_varVelFloTogether_analyze/MedPrev_MedFlow/Dlower.csv',skiprows = 1, delimiter=",")
+sectHigher = np.loadtxt('/Users/elisabethburnor/Desktop/Typhoid model GIS/sensitivity_analyses_varVelFloTogether_analyze/MedPrev_MedFlow/Dupper.csv',skiprows = 1, delimiter=",")
+  
+sectMH = sectM[:,section]
+  #sectSDH = sectSD[:,section]
+sectLH = sectLower[:,section]
+sectHH = sectHigher[:,section]
+
+hour = np.arange(24)
+#plt.errorbar(hour,sectMH, yerr = (ybot, ytop))
+fig = plt.plot(hour, sectMH, '-')
+plt.fill_between(hour, sectLH, sectHH, alpha=0.2)
+plt.xticks([0,2,4,6,8,10,12,14,16,18,20,22,24])
+brID = 'Branch ' + str(branchID)+' Section '+str(section)
+plt.title(brID)
+plt.xlabel('Hour')
+plt.ylabel('P(detection)')
+plt.tight_layout()
+  
+  if(saveFile):
+      filename = brID + '.tiff'
+      savePath = pathlib.Path(self.filePath, filename)
+      plt.savefig(savePath)
+      plt.close()
+  else:
+      return(fig)
+    
+"""
+import random as random
+for run in sr.values():
+
+        run = sr["LowPrev_VHighFlow"]
+        label = run[0]
+        prev = run[1]
+        vel = run[2]
+        env_mean = run[3]
+        env_sd = run[4]
+        
+
+        fixed_p_sens = fixed_p
+        fixed_p_sens[:,4] = prev
+        
+        dist_p_sens = dist_p
+        dist_p_sens[7] = env_mean
+        dist_p_sens[8] = env_sd
+        
+
+        # Set up water system
+        # WaterSystem(fixParams,distParams,dayParams, shedding, samVol, sens, bactNum)
+        ws = dyn.WaterSystem(fixParams=fixed_p_sens, distParams = dist_p_sens, dayParams = day_p, probShed = probShed,sheddingDist = shedDist, samVol = 6, sens = 0.83, bactNum = 1,savePath = run_savepath, resolution = 10)
+        
+        check = np.zeros((2,1000))
+        for i in range(1000):
+            
+            bran = ws.branches[750]
+            bran.initializeParams(ws.def_r, ws.fl, ws.efl, random.choices([ws.des_r[0],ws.des_r[1],ws.des_r[2]], k = 1)[0], ws.probShed, ws.shedDist)
+            
+            number_sick = np.sum(bran.pop[:,0])
+                
+            print('Sim ' + str(i) + ': ' + str(number_sick) + ' shedding: ' + str(bran.shedRate))
+            
+            check[0, i] = number_sick
+            check[1, i] = bran.shedRate
+            
+            np.mean(check[1,:])
+            np.mean(check[0,:])
+            
+        import pickle as pickle
+        
+        pickle.dumb(ws, )
+        
+ 
+
+
+
+
+branches = ws.branches
+    
+for b in branches.values():
+    print(str(b.id) + " ", str(b.velocity) + " " + str(b.flowRate) + " " + str(b.eflow))
+        
+    b = branches[635]
+
+# (str(bran.id) + " " + str(i) + " " + str(dist))        
+# 635, i = 1, dist = 0
+
+  for i in range(len(b.pathSection)-1,-1, -1):
+      print(i)
+    
+    start_run = time.time()
+    ws.run(3,1)
+    stop_run = time.time()
+    print("one run", stop_run-start_run)
+    
+    branches = ws.branches
+    bran = branches[573]
+
+"""
+
+
