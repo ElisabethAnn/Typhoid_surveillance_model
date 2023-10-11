@@ -22,6 +22,9 @@ day_p = np.loadtxt('Day_Params.csv',skiprows = 1, delimiter=",")
 probShed = np.loadtxt('shedding_probability.csv', skiprows = 1, delimiter=",")
 shedDist = np.loadtxt('shedding_distribution.csv',  skiprows = 1, delimiter=",")
 
+# Create filepath for folder where results will go
+run_savepath = '/filepath/'
+
 # Set up water system
 # WaterSystem(fixParams,distParams,dayParams, shedding, samVol, sens, bactNum)
     
